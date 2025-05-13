@@ -1,0 +1,115 @@
+services:
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    restart: unless-stopped
+    container_name: caddy
+    networks:
+      - wp-tier
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    cap_add:
+      - NET_ADMIN
+    env_file:
+      - .env
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME}
+      - ACME_EMAIL=${ACME_EMAIL}
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+      - PHPMYADMIN_PATH=${PHPMYADMIN_PATH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - wordpress_data:/var/www/html:ro
+      - /var/log/caddy:/var/log/caddy
+    
+
+  mariadb:
+    image: ${MARIADB_IMAGE_TAG}
+    container_name: mariadb
+    restart: unless-stopped
+    volumes:
+      - mariadb_data:/bitnami/mariadb
+    env_file:
+      - .env
+    environment:
+      MARIADB_DATABASE: ${WORDPRESS_DB_NAME}
+      MARIADB_USER: ${WORDPRESS_DB_USER}
+      MARIADB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${WORDPRESS_DB_ADMIN_PASSWORD}
+      # Additional MariaDB settings
+      MARIADB_CHARACTER_SET: utf8mb4
+      MARIADB_COLLATE: utf8mb4_unicode_ci
+    networks:
+      - wp-tier
+    healthcheck:
+      test: ["CMD", "/opt/bitnami/scripts/mariadb/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_interval: 5s
+
+  phpmyadmin:
+    image: bitnami/phpmyadmin:latest
+    container_name: phpmyadmin
+    networks:
+      - wp-tier
+    depends_on:
+      - mariadb
+    env_file:
+      - .env
+    environment:
+      DATABASE_HOST: mariadb
+      DATABASE_PORT_NUMBER: 3306
+      DATABASE_ALLOW_NO_PASSWORD: no
+
+  wordpress:
+    image: ${WORDPRESS_IMAGE_TAG}
+    container_name: wordpress
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DATABASE_HOST: mariadb
+      WORDPRESS_DATABASE_PORT_NUMBER: 3306
+      WORDPRESS_DATABASE_NAME: ${WORDPRESS_DB_NAME}
+      WORDPRESS_DATABASE_USER: ${WORDPRESS_DB_USER}
+      WORDPRESS_DATABASE_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+      WORDPRESS_TABLE_PREFIX: ${WORDPRESS_TABLE_PREFIX}
+      WORDPRESS_BLOG_NAME: ${WORDPRESS_BLOG_NAME}
+      WORDPRESS_FIRST_NAME: ${WORDPRESS_ADMIN_NAME}
+      WORDPRESS_LAST_NAME: ${WORDPRESS_ADMIN_LASTNAME}
+      WORDPRESS_USERNAME: ${WORDPRESS_ADMIN_USERNAME}
+      WORDPRESS_PASSWORD: ${WORDPRESS_ADMIN_PASSWORD}
+      WORDPRESS_EMAIL: ${WORDPRESS_ADMIN_EMAIL}
+      WORDPRESS_ENABLE_HTTPS: yes
+      WORDPRESS_ENABLE_REVERSE_PROXY: yes
+      ALLOW_EMPTY_PASSWORD: no
+      PHP_MEMORY_LIMIT: 256M
+      PHP_MAX_EXECUTION_TIME: 300
+    volumes:
+      - wordpress_data:/bitnami/wordpress
+    networks:
+      - wp-tier
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+networks:
+  frontend:
+  wp-tier:
+
+volumes:
+  mariadb_data:
+  wordpress_data:
+  caddy_config:
+  caddy_data:

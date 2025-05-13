@@ -1,0 +1,156 @@
+{
+	# Email for ACME (Let's Encrypt) notifications
+	email {$ACME_EMAIL}
+
+	servers {
+		# Set reasonable timeouts
+		timeouts {
+			read_body 15s
+			read_header 10s
+			write 30s
+			idle 5m
+		}
+	}
+
+	# Default TLS settings (applied globally)
+	default_sni {$DOMAIN_NAME}
+
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10MB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		level DEBUG
+	}
+}
+
+{$DOMAIN_NAME} {
+	# Enable TLS with Cloudflare compatibility
+	# When using Cloudflare's proxy, use this setting instead of automatic HTTPS
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+	}
+
+	encode gzip zstd
+
+	route {
+		@phpmyadmin path /{$PHPMYADMIN_PATH}*
+
+		handle @phpmyadmin {
+			uri strip_prefix /{$PHPMYADMIN_PATH}
+
+			# This matcher works *after* the path is stripped
+			@pma_login {
+				path /index.php
+				method POST
+			}
+
+			rate_limit @pma_login {
+				zone phpmyadmin_login {
+					key {remote_host}
+					events 5
+					window 1m
+				}
+			}
+
+			reverse_proxy phpmyadmin:8080
+		}
+	}
+
+	# WordPress security headers
+	header {
+		# Security headers
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-XSS-Protection "1; mode=block"
+		Content-Security-Policy "upgrade-insecure-requests; default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' *.googleapis.com *.gstatic.com www.google-analytics.com stats.wp.com *.cloudflare.com; connect-src 'self' *.googleapis.com *.gstatic.com www.google-analytics.com stats.wp.com; img-src 'self' data: blob: *.googleapis.com *.gstatic.com www.google-analytics.com; style-src 'self' 'unsafe-inline' *.googleapis.com *.gstatic.com; font-src 'self' data: *.googleapis.com *.gstatic.com; frame-src 'self'"
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()"
+
+		# Remove server identity headers
+		-Server
+		-X-Powered-By
+		-X-Redirect-By
+	}
+
+	# Rate limit login and admin areas
+	@login_areas {
+		path /wp-login.php /wp-admin/*
+		method POST
+	}
+
+	# Implement rate limiting with the rate_limit directive
+	rate_limit @login_areas {
+		zone wp_login_limit {
+			key {remote_host}
+			events 5
+			window 1m
+		}
+	}
+
+	# Block access to sensitive files
+	@blocked_paths {
+		path *.sql
+		path wp-config.php
+		path wp-content/debug.log
+		path /license.txt
+		path /readme.html
+		path /wp-includes/*.php
+		path /wp-admin/install.php
+		path /wp-admin/includes/*.php
+		path /wp-admin/setup-config.php
+		path /xmlrpc.php # Commonly used for brute force attacks
+		path /wp-config-sample.php
+		path *.bak
+		path *.swp
+	}
+	respond @blocked_paths 403 {
+		body "Access Denied"
+		close
+	}
+
+	# Disable directory listings
+	@sensitive_dirs {
+		path /wp-content/uploads/*/ /wp-content/plugins/*/ /wp-content/themes/*/
+		not path /wp-admin/*
+	}
+	respond @sensitive_dirs 403 {
+		body "Access Denied"
+	}
+
+	# Block common bot/vulnerability scanner user agents
+	@bad_bots {
+		header User-Agent "~*(masscan|nikto|sqlmap|libwww|python|curl|wget|nmap|acunetix|qualys|searchmetrics|semrush)"
+	}
+	respond @bad_bots 403 {
+		body "Forbidden"
+		close
+	}
+
+	# Set long cache headers for media and fonts, except under /wp-admin
+	@static_assets {
+		path *.css *.js *.svg *.woff *.woff2 *.ttf *.jpg *.jpeg *.png *.gif *.ico *.webp *.avif *.webm *.mp4
+		not path /wp-admin/*
+	}
+
+	header @static_assets {
+		Cache-Control "public, max-age=31536000"
+		X-Cache-Status "HIT"
+	}
+
+	# Proxy everything else to WordPress container
+	reverse_proxy wordpress:8080 {
+		# Headers needed for proper WordPress functionality behind proxy
+		header_up Host {host}
+		header_up X-Real-IP {remote}
+		header_up X-Forwarded-For {remote}
+		header_up X-Forwarded-Port {server_port}
+		header_up X-Forwarded-Proto {scheme}
+
+		# Cloudflare specific headers if available
+		header_up CF-Connecting-IP {header.CF-Connecting-IP}
+		header_up CF-IPCountry {header.CF-IPCountry}
+	}
+}
